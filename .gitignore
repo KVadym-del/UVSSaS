@@ -450,6 +450,7 @@ FodyWeavers.xsd
 # End of https://www.toptal.com/developers/gitignore/api/c++,visualstudio,visualstudiocode
 
 vcpkg_installed/
+.vscode/
 
 *.mp4
 *.bgra
