@@ -1,0 +1,14 @@
+{
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "features": ["x264", "x265", "nvcodec"]
+    },
+    {
+      "name": "fmt"
+    },
+    {
+      "name": "boost-asio"
+    }
+  ]
+}
