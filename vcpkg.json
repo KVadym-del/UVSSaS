@@ -2,7 +2,7 @@
   "dependencies": [
     {
       "name": "ffmpeg",
-      "features": ["x264", "x265", "nvcodec"]
+      "features": [ "x264", "x265", "nvcodec" ]
     },
     {
       "name": "fmt"

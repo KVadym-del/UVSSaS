@@ -1,6 +1,7 @@
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#include <libavcodec/filtering_video.h>
 #include <libavdevice/avdevice.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
@@ -34,6 +35,7 @@ constexpr const double g_recordDuration{ 10.0 };
 
 constexpr const std::string_view g_deviceName{ "desktop" };
 constexpr const std::string_view g_inputFormatName{ "gdigrab" };
+
 
 static std::string ffmpeg_error_str(int32_t errnum) {
 	char errbuf[AV_ERROR_MAX_STRING_SIZE];
@@ -99,7 +101,6 @@ inline void cleanup_scaler(ScalerContext& scaler_ctx) noexcept {
 inline void init_ffmpeg_libraries() noexcept
 {
 	avdevice_register_all();
-
 }
 
 inline defReturn init_device(InputContext& in_ctx)
@@ -118,7 +119,9 @@ inline defReturn init_device(InputContext& in_ctx)
 	av_dict_set(&options, "video_size", g_captureResolution, 0);
 	av_dict_set(&options, "draw_mouse", "1", 0);
 
-	av_dict_set(&options, "probesize", "10M", 0);
+	av_dict_set(&options, "thread_queue_size", "512", 0);
+
+	av_dict_set(&options, "probesize", "20M", 0);
 	av_dict_set(&options, "analyzeduration", "10M", 0);
 
 	in_ctx.fmt_ctx = avformat_alloc_context();
@@ -143,7 +146,7 @@ inline defReturn init_device(InputContext& in_ctx)
 		};
 	}
 
-	int ret = 0;
+	// int32_t ret = 0;
 	if ((t = av_dict_get(options, "", nullptr, AV_DICT_IGNORE_SUFFIX))) {
 		fmt::println(stderr, "Warning: Not all options were consumed by avformat_open_input:");
 		while ((t = av_dict_get(options, "", t, AV_DICT_IGNORE_SUFFIX))) {
@@ -188,26 +191,37 @@ inline defReturn init_device(InputContext& in_ctx)
 	return {};
 }
 
-inline defReturn initialize_output(OutputContext& out_ctx, const InputContext& in_ctx)
+inline defReturn initialize_output(OutputContext* out_ctx, const InputContext* in_ctx)
 {
+	if (!out_ctx)
+		return std::unexpected{ "Output context is null." };
+
+	if (!in_ctx || !in_ctx->video_codecpar)
+		return std::unexpected{ "Input context or video codec parameters are null." };
+	
 	int32_t res{};
-	if ((res = avformat_alloc_output_context2(&out_ctx.fmt_ctx, nullptr, nullptr, g_outFileName.data())) < 0) {
+	if ((res = avformat_alloc_output_context2(
+		&out_ctx->fmt_ctx,
+		nullptr,
+		nullptr, 
+		g_outFileName.data()
+	)) < 0) {
 		return std::unexpected{
 			fmt::format("Failed to allocate output format context for '{}': {}", g_outFileName.data(), ffmpeg_error_str(res))
 		};
 	}
 
-	out_ctx.video_stream = avformat_new_stream(out_ctx.fmt_ctx, nullptr);
-	if (!out_ctx.video_stream) {
-		cleanup_output(out_ctx);
+	out_ctx->video_stream = avformat_new_stream(out_ctx->fmt_ctx, nullptr);
+	if (!out_ctx->video_stream) {
+		cleanup_output(*out_ctx);
 		return std::unexpected{ fmt::format("Failed to create new stream: {}", ffmpeg_error_str(AVERROR(ENOMEM))) };
 	}
 
-	out_ctx.video_stream->time_base = av_make_q(1, g_captureFrameRate);
+	out_ctx->video_stream->time_base = av_make_q(1, g_captureFrameRate);
 
-	if (!(out_ctx.fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
-		if ((res = avio_open(&out_ctx.fmt_ctx->pb, g_outFileName.data(), AVIO_FLAG_WRITE)) < 0) {
-			cleanup_output(out_ctx);
+	if (!(out_ctx->fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+		if ((res = avio_open(&out_ctx->fmt_ctx->pb, g_outFileName.data(), AVIO_FLAG_WRITE)) < 0) {
+			cleanup_output(*out_ctx);
 			return std::unexpected{
 				fmt::format("Failed to open output file '{}': {}", g_outFileName.data(), ffmpeg_error_str(res))
 			};
@@ -216,9 +230,11 @@ inline defReturn initialize_output(OutputContext& out_ctx, const InputContext& i
 
 	fmt::println("Output: {} ({})\n  Target Size: {}x{}, Target Framerate (set): {}",
 		g_outFileName,
-		out_ctx.fmt_ctx->oformat->long_name ? out_ctx.fmt_ctx->oformat->long_name : out_ctx.fmt_ctx->oformat->name,
-		in_ctx.video_codecpar->width,
-		in_ctx.video_codecpar->height,
+		out_ctx->fmt_ctx->oformat->long_name ?
+		out_ctx->fmt_ctx->oformat->long_name :
+		out_ctx->fmt_ctx->oformat->name,
+		in_ctx->video_codecpar->width,
+		in_ctx->video_codecpar->height,
 		g_captureFrameRate
 	);
 	return {};
@@ -261,6 +277,7 @@ inline defReturn initialize_encoder(EncoderContext& enc_ctx, OutputContext& out_
 	}
 	else if (std::string_view(enc_ctx.codec->name) == "libx264") {
 		fmt::println("Configuring libx264 options...");
+		av_opt_set(enc_ctx.codec_ctx->priv_data, "threads", "auto", 0);
 		av_opt_set(enc_ctx.codec_ctx->priv_data, "preset", "ultrafast", 0);
 		av_opt_set(enc_ctx.codec_ctx->priv_data, "tune", "zerolatency", 0);
 	}
@@ -294,7 +311,7 @@ inline defReturn initialize_scaler(ScalerContext& scaler_ctx, const InputContext
 	scaler_ctx.sws_ctx = sws_getContext(
 		in_ctx.video_codecpar->width, in_ctx.video_codecpar->height, (AVPixelFormat)in_ctx.video_codecpar->format,
 		enc_ctx.codec_ctx->width, enc_ctx.codec_ctx->height, enc_ctx.codec_ctx->pix_fmt,
-		SWS_BILINEAR, nullptr, nullptr, nullptr
+		SWS_FAST_BILINEAR, nullptr, nullptr, nullptr
 	);
 	if (!scaler_ctx.sws_ctx) {
 		return std::unexpected{ fmt::format("Failed to create scaler context ({} {}x{} -> {} {}x{})",
@@ -390,7 +407,7 @@ int main() {
 		return 1;
 	}
 
-	auto output_result = initialize_output(out_ctx, in_ctx);
+	auto output_result = initialize_output(&out_ctx, &in_ctx);
 	if (!output_result) {
 		fmt::println(stderr, "Error initializing output: {}", output_result.error());
 		cleanup_input(in_ctx);
@@ -405,10 +422,18 @@ int main() {
 		return 1;
 	}
 
+	if (!enc_ctx.codec_ctx || !in_ctx.video_codecpar) {
+		return 1;
+	}
+
 	bool scaler_initialized = false;
-	if (static_cast<AVPixelFormat>(in_ctx.video_codecpar->format) != enc_ctx.codec_ctx->pix_fmt ||
-		in_ctx.video_codecpar->width != enc_ctx.codec_ctx->width ||
-		in_ctx.video_codecpar->height != enc_ctx.codec_ctx->height) {
+	if (static_cast<AVPixelFormat>(in_ctx.video_codecpar->format) !=
+		enc_ctx.codec_ctx->pix_fmt ||
+		in_ctx.video_codecpar->width !=
+		enc_ctx.codec_ctx->width ||
+		in_ctx.video_codecpar->height !=
+		enc_ctx.codec_ctx->height
+		) {
 		auto scaler_result = initialize_scaler(scaler_ctx, in_ctx, enc_ctx);
 		if (!scaler_result) {
 			fmt::println(stderr, "Error initializing scaler: {}", scaler_result.error());
@@ -431,7 +456,11 @@ int main() {
 	AVPacket* in_pkt = av_packet_alloc();
 	AVFrame* raw_frame = av_frame_alloc();
 	if (!in_pkt || !raw_frame) {
-		fmt::println(stderr, "Error allocating packet/frame for input: {}", ffmpeg_error_str(AVERROR(ENOMEM)));
+		fmt::println(
+			stderr,
+			"Error allocating packet/frame for input: {}",
+			ffmpeg_error_str(AVERROR(ENOMEM))
+		);
 		if (scaler_initialized) cleanup_scaler(scaler_ctx);
 		cleanup_encoder(enc_ctx); cleanup_output(out_ctx); cleanup_input(in_ctx);
 		if (out_ctx.fmt_ctx && !(out_ctx.fmt_ctx->oformat->flags & AVFMT_NOFILE) && out_ctx.fmt_ctx->pb) {
@@ -441,16 +470,16 @@ int main() {
 	}
 
 	fmt::println("Recording started for {} seconds (0 for indefinite)...", g_recordDuration);
-	auto start_time = std::chrono::steady_clock::now();
+	const auto start_time = std::chrono::steady_clock::now();
 	int32_t frames_written{};
 	int32_t packets_read_count{};
-	bool first_packet_dumped = false;
+	constexpr const bool FIRST_PACKET_DUMPED{ false };
 
-	const int32_t GDI_HEADER_SIZE = 54;
+	constexpr const int32_t GDI_HEADER_SIZE{ 54 };
 
 	while (true) {
-		auto current_time = std::chrono::steady_clock::now();
-		std::chrono::duration<double> elapsed_seconds = current_time - start_time;
+		const auto current_time = std::chrono::steady_clock::now();
+		const std::chrono::duration<double> elapsed_seconds = current_time - start_time;
 		if (g_recordDuration > 0.0 && elapsed_seconds.count() >= g_recordDuration) {
 			fmt::println("Recording duration ({:.1f}s) reached.", g_recordDuration);
 			break;
@@ -537,7 +566,6 @@ int main() {
 			auto encode_result = encode_and_write_frame(frame_to_encode, enc_ctx, out_ctx);
 			if (!encode_result) {
 				fmt::println(stderr, "Error encoding and writing frame: {}", encode_result.error());
-
 			}
 			else {
 				frames_written++;
