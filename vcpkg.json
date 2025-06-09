@@ -1,14 +1,20 @@
 {
   "dependencies": [
+    "boost-asio",
     {
       "name": "ffmpeg",
-      "features": [ "x264", "x265", "nvcodec" ]
+      "features": [
+        "avcodec",
+        "avdevice",
+        "avfilter",
+        "avformat",
+        "avresample",
+        "nvcodec",
+        "swscale",
+        "x264",
+        "x265"
+      ]
     },
-    {
-      "name": "fmt"
-    },
-    {
-      "name": "boost-asio"
-    }
+    "fmt"
   ]
 }
